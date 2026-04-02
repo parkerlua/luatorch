@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(chmod +x /Users/inventings/Desktop/Linear/luaflow/tools/install.sh)",
-      "Bash(grep -v \":0$\")",
-      "Read(//Users/inventings/Desktop/Linear/luaflow/**)"
-    ]
-  }
-}
