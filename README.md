@@ -2,7 +2,7 @@
 
 A modern CUDA-accelerated deep learning framework written in Lua and C. The first serious Lua AI framework since Torch7 was abandoned in 2018.
 
-luatorch gives you the full PyTorch experience in Lua: tensors, autograd, neural network layers, optimizers, data loading, model checkpointing, and GPU acceleration. Everything from training an XOR network to training a GPT language model on your 4090.
+luatorch gives you the full PyTorch experience in Lua: tensors, autograd, neural network layers, optimizers, data loading, model checkpointing, and GPU acceleration. Everything from training an XOR network to training a GPT language model.
 
 ## Why Lua?
 
