@@ -14,7 +14,6 @@ LuaJIT is the fastest dynamic language runtime ever built. Its FFI lets you call
 - **CUDA Toolkit** 12.0+ (for GPU acceleration)
 - **CMake** 3.18+
 - **Any NVIDIA GPU** with compute capability 5.0+ (tested on RTX 4090)
-- **Linux or macOS** for development (training runs on Linux with NVIDIA drivers)
 
 ## Installation
 
