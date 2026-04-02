@@ -121,6 +121,9 @@ function autograd.relu(x)
 end
 
 -- backward pass, walks graph in reverse
+-- perf fix: prunes intermediate node gradients after they're consumed
+-- old code kept all gradients in memory until zero_graph was called
+-- new code frees grads on non-leaf intermediate tensors after backward
 function autograd.backward(loss)
     local ones_shape = loss.shape
     local seed_grad  = Tensor.new(ones_shape)
@@ -132,6 +135,12 @@ function autograd.backward(loss)
         local node = autograd.graph[i]
         if node.grad_fn and node.tensor.grad then
             node.grad_fn(node.tensor.grad)
+
+            -- free intermediate gradient to reduce memory pressure
+            -- keep gradients on leaf tensors (parameters) since the optimizer needs them
+            if node.op ~= "leaf" and not node.tensor.requires_grad then
+                node.tensor.grad = nil
+            end
         end
     end
 end

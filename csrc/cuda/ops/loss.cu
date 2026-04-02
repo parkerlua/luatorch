@@ -5,6 +5,7 @@
 // forward declarations
 extern "C" Tensor* tensor_new_cuda(int64_t* shape, int ndim, DType dtype);
 extern "C" float tensor_sum_cuda(Tensor* a);
+extern "C" void tensor_cuda_free(Tensor* t);
 
 #define BLOCK_SIZE 256
 
@@ -59,8 +60,6 @@ __global__ void mae_grad_kernel(float* pred, float* target, float* grad, int64_t
 }
 
 // cross entropy kernel
-// one thread per batch item
-// computes softmax + nll for each sample
 __global__ void cross_entropy_kernel(float* pred, float* target, float* losses,
                                       int64_t batch, int64_t classes) {
     int64_t b = blockIdx.x * blockDim.x + threadIdx.x;
@@ -69,13 +68,17 @@ __global__ void cross_entropy_kernel(float* pred, float* target, float* losses,
     float* row = pred + b * classes;
     int64_t label = (int64_t)target[b];
 
-    // find max for stability
+    // fix: bounds check label to prevent out of bounds access
+    if (label < 0 || label >= classes) {
+        losses[b] = 0.0f;
+        return;
+    }
+
     float max_val = row[0];
     for (int64_t c = 1; c < classes; c++) {
         if (row[c] > max_val) max_val = row[c];
     }
 
-    // log sum exp
     float lse = 0.0f;
     for (int64_t c = 0; c < classes; c++) {
         lse += expf(row[c] - max_val);
@@ -86,7 +89,6 @@ __global__ void cross_entropy_kernel(float* pred, float* target, float* losses,
 }
 
 // cross entropy backward kernel
-// computes softmax(pred) - one_hot(target)
 __global__ void cross_entropy_grad_kernel(float* pred, float* target, float* grad,
                                            int64_t batch, int64_t classes) {
     int64_t b = blockIdx.x * blockDim.x + threadIdx.x;
@@ -96,7 +98,12 @@ __global__ void cross_entropy_grad_kernel(float* pred, float* target, float* gra
     float* grad_row = grad + b * classes;
     int64_t label   = (int64_t)target[b];
 
-    // compute softmax
+    // fix: bounds check label
+    if (label < 0 || label >= classes) {
+        for (int64_t c = 0; c < classes; c++) grad_row[c] = 0.0f;
+        return;
+    }
+
     float max_val = row[0];
     for (int64_t c = 1; c < classes; c++) {
         if (row[c] > max_val) max_val = row[c];
@@ -110,13 +117,21 @@ __global__ void cross_entropy_grad_kernel(float* pred, float* target, float* gra
         grad_row[c] /= sum;
     }
 
-    // subtract one hot
     grad_row[label] -= 1.0f;
 
-    // average over batch
     for (int64_t c = 0; c < classes; c++) {
         grad_row[c] /= (float)batch;
     }
+}
+
+// helper: free a temp tensor through pool_free properly
+static void free_temp_tensor(Tensor* t) {
+    if (!t) return;
+    // fix: use tensor_cuda_free which calls pool_free instead of raw cudaFree
+    tensor_cuda_free(t);
+    free(t->strides);
+    free(t->shape);
+    free(t);
 }
 
 // cuda loss wrappers
@@ -124,7 +139,6 @@ __global__ void cross_entropy_grad_kernel(float* pred, float* target, float* gra
 extern "C" Tensor* tensor_mse_loss_cuda(Tensor* pred, Tensor* target) {
     if (!pred || !target || pred->numel != target->numel) return NULL;
 
-    // compute squared differences
     Tensor* diff_sq = tensor_new_cuda(pred->shape, pred->ndim, pred->dtype);
     if (!diff_sq) return NULL;
 
@@ -133,23 +147,15 @@ extern "C" Tensor* tensor_mse_loss_cuda(Tensor* pred, Tensor* target) {
                                                 diff_sq->cuda_data, pred->numel);
     CUDA_KERNEL_CHECK();
 
-    // sum and average
     float total = tensor_sum_cuda(diff_sq);
+    free_temp_tensor(diff_sq);
 
-    // clean up temp tensor
-    cudaFree(diff_sq->cuda_data);
-    free(diff_sq->strides);
-    free(diff_sq->shape);
-    free(diff_sq);
-
-    // return scalar tensor
     int64_t out_shape[1] = {1};
     Tensor* out = tensor_new_cuda(out_shape, 1, pred->dtype);
     if (!out) return NULL;
 
     float result = total / (float)pred->numel;
     cudaMemcpy(out->cuda_data, &result, sizeof(float), cudaMemcpyHostToDevice);
-
     return out;
 }
 
@@ -178,11 +184,7 @@ extern "C" Tensor* tensor_mae_loss_cuda(Tensor* pred, Tensor* target) {
     CUDA_KERNEL_CHECK();
 
     float total = tensor_sum_cuda(abs_diff);
-
-    cudaFree(abs_diff->cuda_data);
-    free(abs_diff->strides);
-    free(abs_diff->shape);
-    free(abs_diff);
+    free_temp_tensor(abs_diff);
 
     int64_t out_shape[1] = {1};
     Tensor* out = tensor_new_cuda(out_shape, 1, pred->dtype);
@@ -190,7 +192,6 @@ extern "C" Tensor* tensor_mae_loss_cuda(Tensor* pred, Tensor* target) {
 
     float result = total / (float)pred->numel;
     cudaMemcpy(out->cuda_data, &result, sizeof(float), cudaMemcpyHostToDevice);
-
     return out;
 }
 
@@ -214,7 +215,6 @@ extern "C" Tensor* tensor_cross_entropy_loss_cuda(Tensor* pred, Tensor* target) 
     int64_t batch   = pred->shape[0];
     int64_t classes = pred->shape[1];
 
-    // compute per-sample losses
     int64_t losses_shape[1] = {batch};
     Tensor* losses = tensor_new_cuda(losses_shape, 1, pred->dtype);
     if (!losses) return NULL;
@@ -224,13 +224,8 @@ extern "C" Tensor* tensor_cross_entropy_loss_cuda(Tensor* pred, Tensor* target) 
                                                   losses->cuda_data, batch, classes);
     CUDA_KERNEL_CHECK();
 
-    // average
     float total = tensor_sum_cuda(losses);
-
-    cudaFree(losses->cuda_data);
-    free(losses->strides);
-    free(losses->shape);
-    free(losses);
+    free_temp_tensor(losses);
 
     int64_t out_shape[1] = {1};
     Tensor* out = tensor_new_cuda(out_shape, 1, pred->dtype);
@@ -238,7 +233,6 @@ extern "C" Tensor* tensor_cross_entropy_loss_cuda(Tensor* pred, Tensor* target) 
 
     float result = total / (float)batch;
     cudaMemcpy(out->cuda_data, &result, sizeof(float), cudaMemcpyHostToDevice);
-
     return out;
 }
 

@@ -58,30 +58,38 @@ function AdamW:step()
         if not param.grad then goto continue end
         local grad = param.grad
 
-        -- apply weight decay before the adam update
-        -- param = param * (1 - lr * weight_decay)
-        -- skip for parameters marked as no_decay (bias, layernorm)
-        if self.weight_decay > 0 and not self.no_decay[param] then
-            local decay = 1.0 - self.lr * self.weight_decay
+        -- figure out weight decay for this parameter
+        local wd = self.weight_decay
+        if self.no_decay[param] then wd = 0.0 end
+
+        -- use fused cuda kernel when on gpu
+        -- does weight decay + full adam update in one kernel launch
+        if param.device == 'cuda' and Tensor.fused_adam(
+            param, grad, self.m[i], self.v[i],
+            self.lr, self.beta1, self.beta2, self.epsilon,
+            bc1, bc2, wd
+        ) then
+            goto continue
+        end
+
+        -- cpu path: separate tensor operations
+        if wd > 0 then
+            local decay = 1.0 - self.lr * wd
             Tensor.mul_scalar_(param, decay)
         end
 
-        -- update momentum: m = beta1 * m + (1 - beta1) * grad
         Tensor.mul_scalar_(self.m[i], self.beta1)
         local grad_scaled = Tensor.mul_scalar(grad, 1.0 - self.beta1)
         Tensor.add_(self.m[i], grad_scaled)
 
-        -- update velocity: v = beta2 * v + (1 - beta2) * grad^2
         Tensor.mul_scalar_(self.v[i], self.beta2)
         local grad_sq = Tensor.pow_scalar(grad, 2.0)
         local grad_sq_scaled = Tensor.mul_scalar(grad_sq, 1.0 - self.beta2)
         Tensor.add_(self.v[i], grad_sq_scaled)
 
-        -- bias corrected estimates
         local m_hat = Tensor.div_scalar(self.m[i], bc1)
         local v_hat = Tensor.div_scalar(self.v[i], bc2)
 
-        -- compute update: lr * m_hat / (sqrt(v_hat) + eps)
         local v_sqrt   = Tensor.sqrt(v_hat)
         local v_stable = Tensor.add_scalar(v_sqrt, self.epsilon)
         local update   = Tensor.div(m_hat, v_stable)

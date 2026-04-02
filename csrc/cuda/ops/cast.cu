@@ -75,20 +75,29 @@ __global__ void check_inf_nan_kernel(float* data, int* has_inf_nan, int64_t n) {
 extern "C" int tensor_has_inf_nan_cuda(Tensor* t) {
     if (!t || !t->cuda_data) return 0;
 
+    // fix: check cudaMalloc return value, old code crashed on alloc failure
     int* d_flag;
-    cudaMalloc((void**)&d_flag, sizeof(int));
+    if (cudaMalloc((void**)&d_flag, sizeof(int)) != cudaSuccess) {
+        fprintf(stderr, "luatorch cuda error: failed to alloc inf/nan flag\n");
+        return 0;
+    }
     cudaMemset(d_flag, 0, sizeof(int));
 
     int blocks = num_blocks(t->numel);
     check_inf_nan_kernel<<<blocks, BLOCK_SIZE>>>(t->cuda_data, d_flag, t->numel);
 
     int result = 0;
-    cudaMemcpy(&result, d_flag, sizeof(int), cudaMemcpyDeviceToHost);
+    // fix: check cudaMemcpy return value, old code used garbage on failure
+    cudaError_t err = cudaMemcpy(&result, d_flag, sizeof(int), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "luatorch cuda error: inf/nan check memcpy failed: %s\n",
+            cudaGetErrorString(err));
+        result = 1;  // assume overflow on failure to be safe
+    }
     cudaFree(d_flag);
     return result;
 }
 
-// scale a tensor by a scalar in place
 __global__ void scale_kernel(float* data, float scale, int64_t n) {
     int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) data[i] *= scale;
@@ -98,4 +107,9 @@ extern "C" void tensor_scale_cuda(Tensor* t, float scale) {
     if (!t || !t->cuda_data) return;
     int blocks = num_blocks(t->numel);
     scale_kernel<<<blocks, BLOCK_SIZE>>>(t->cuda_data, scale, t->numel);
+    // fix: check kernel launch error
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "luatorch cuda kernel error: %s\n", cudaGetErrorString(err));
+    }
 }

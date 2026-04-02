@@ -37,11 +37,17 @@ function TransformerBlock.new(embed_dim, num_heads, dropout_p, ffn_mult, use_fla
     local ffn_dim  = embed_dim * ffn_mult
 
     -- attention sublayer
-    -- use flash attention if available and requested
+    -- fix: pcall the flash attention constructor so internal errors fall back to naive
     self.ln1 = LayerNorm.new(embed_dim)
+    local used_flash = false
     if use_flash and FlashAttention then
-        self.attn = FlashAttention.new(embed_dim, num_heads, true)
-    else
+        local flash_ok, attn = pcall(FlashAttention.new, embed_dim, num_heads, true)
+        if flash_ok and attn then
+            self.attn = attn
+            used_flash = true
+        end
+    end
+    if not used_flash then
         self.attn = MultiHeadAttention.new(embed_dim, num_heads)
     end
     self.drop1 = Dropout.new(dropout_p)

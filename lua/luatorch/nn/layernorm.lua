@@ -39,78 +39,54 @@ function LayerNorm:forward(input)
     local ndim  = input.ndim
     local dim   = shape[ndim]
 
-    -- flatten to [rows, features] for the math
     local rows = input:numel() / dim
     local flat = input
-
-    -- compute mean and variance per row
-    -- then normalize: out = gamma * (x - mean) / sqrt(var + eps) + beta
-    -- we do this element by element through the Lua side
-    -- because we need per-row stats, not a global reduction
     local out = Tensor.new(shape)
 
+    -- perf fix: cache per-row mean, inv_std, and x_hat during forward
+    -- old code recomputed them 3 separate times in backward, wasting ~3x compute
+    local cached_inv_std = {}
+    local cached_x_hat   = {}
+
     for r = 0, rows - 1 do
-        -- compute mean for this row
         local row_sum = 0.0
         for c = 0, dim - 1 do
             row_sum = row_sum + flat:get(r * dim + c)
         end
         local row_mean = row_sum / dim
 
-        -- compute variance for this row
         local var_sum = 0.0
         for c = 0, dim - 1 do
             local diff = flat:get(r * dim + c) - row_mean
             var_sum = var_sum + diff * diff
         end
-        local row_var = var_sum / dim
+        local inv_std = 1.0 / math.sqrt(var_sum / dim + self.eps)
 
-        -- normalize and apply scale/shift
-        local inv_std = 1.0 / math.sqrt(row_var + self.eps)
+        cached_inv_std[r] = inv_std
+
+        local x_hat_row = {}
         for c = 0, dim - 1 do
             local x_norm = (flat:get(r * dim + c) - row_mean) * inv_std
-            local gamma  = self.gamma:get(c)
-            local beta   = self.beta:get(c)
-            out:set(r * dim + c, gamma * x_norm + beta)
+            x_hat_row[c] = x_norm
+            out:set(r * dim + c, self.gamma:get(c) * x_norm + self.beta:get(c))
         end
+        cached_x_hat[r] = x_hat_row
     end
 
-    -- register backward
     autograd.record("layernorm", {input}, out, function(grad)
         if input.requires_grad then
-            -- simplified layernorm backward
-            -- compute per-row gradients
             local dx = Tensor.new(shape)
 
             for r = 0, rows - 1 do
-                -- recompute mean and var for this row
-                local row_sum = 0.0
-                for c = 0, dim - 1 do
-                    row_sum = row_sum + flat:get(r * dim + c)
-                end
-                local row_mean = row_sum / dim
+                -- use cached values instead of recomputing
+                local inv_std  = cached_inv_std[r]
+                local x_hat   = cached_x_hat[r]
 
-                local var_sum = 0.0
-                for c = 0, dim - 1 do
-                    local diff = flat:get(r * dim + c) - row_mean
-                    var_sum = var_sum + diff * diff
-                end
-                local row_var = var_sum / dim
-                local inv_std = 1.0 / math.sqrt(row_var + self.eps)
-
-                -- x_hat for this row
-                local x_hat = {}
-                for c = 0, dim - 1 do
-                    x_hat[c] = (flat:get(r * dim + c) - row_mean) * inv_std
-                end
-
-                -- dL/dx_hat = dL/dy * gamma
                 local dl_dxhat = {}
                 for c = 0, dim - 1 do
                     dl_dxhat[c] = grad:get(r * dim + c) * self.gamma:get(c)
                 end
 
-                -- mean of dl_dxhat and mean of dl_dxhat * x_hat
                 local mean_dl = 0.0
                 local mean_dl_xhat = 0.0
                 for c = 0, dim - 1 do
@@ -120,17 +96,15 @@ function LayerNorm:forward(input)
                 mean_dl = mean_dl / dim
                 mean_dl_xhat = mean_dl_xhat / dim
 
-                -- dx = inv_std * (dl_dxhat - mean_dl - x_hat * mean_dl_xhat)
                 for c = 0, dim - 1 do
-                    local val = inv_std * (dl_dxhat[c] - mean_dl - x_hat[c] * mean_dl_xhat)
-                    dx:set(r * dim + c, val)
+                    dx:set(r * dim + c,
+                        inv_std * (dl_dxhat[c] - mean_dl - x_hat[c] * mean_dl_xhat))
                 end
             end
 
             autograd.acc_grad(input, dx)
         end
 
-        -- gamma and beta gradients
         if self.gamma.requires_grad then
             local dgamma = Tensor.new({dim})
             dgamma:zeros()
@@ -138,24 +112,10 @@ function LayerNorm:forward(input)
             dbeta:zeros()
 
             for r = 0, rows - 1 do
-                local row_sum = 0.0
+                local x_hat = cached_x_hat[r]
                 for c = 0, dim - 1 do
-                    row_sum = row_sum + flat:get(r * dim + c)
-                end
-                local row_mean = row_sum / dim
-
-                local var_sum = 0.0
-                for c = 0, dim - 1 do
-                    local diff = flat:get(r * dim + c) - row_mean
-                    var_sum = var_sum + diff * diff
-                end
-                local row_var = var_sum / dim
-                local inv_std = 1.0 / math.sqrt(row_var + self.eps)
-
-                for c = 0, dim - 1 do
-                    local x_norm = (flat:get(r * dim + c) - row_mean) * inv_std
                     local g = grad:get(r * dim + c)
-                    dgamma:set(c, dgamma:get(c) + g * x_norm)
+                    dgamma:set(c, dgamma:get(c) + g * x_hat[c])
                     dbeta:set(c, dbeta:get(c) + g)
                 end
             end

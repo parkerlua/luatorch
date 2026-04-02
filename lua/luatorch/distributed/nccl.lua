@@ -14,9 +14,12 @@ function nccl.allreduce(tensors)
     local num_gpus = #tensors
     local count    = tensors[1]:numel()
 
-    -- build array of cuda data pointers
     local ptrs = ffi.new('float*[?]', num_gpus)
     for i, t in ipairs(tensors) do
+        -- fix: check tensor is on cuda before accessing cuda_data
+        if t.device ~= 'cuda' then
+            error('luatorch error: nccl allreduce requires all tensors on cuda')
+        end
         ptrs[i - 1] = t._raw.cuda_data
     end
 
@@ -26,11 +29,22 @@ function nccl.allreduce(tensors)
     end
 end
 
--- broadcast tensor from root gpu to all others
-function nccl.broadcast(tensor, root, num_gpus)
+-- fix: broadcast now takes a list of tensors (per-GPU pointers)
+-- old API took a single tensor pointer which is wrong because GPUs have separate address spaces
+function nccl.broadcast(tensors, root, num_gpus)
     root = root or 0
-    local ret = lib.luatorch_nccl_broadcast(
-        tensor._raw.cuda_data, tensor:numel(), root, num_gpus)
+    num_gpus = num_gpus or #tensors
+    local count = tensors[1]:numel()
+
+    local ptrs = ffi.new('float*[?]', num_gpus)
+    for i, t in ipairs(tensors) do
+        if t.device ~= 'cuda' then
+            error('luatorch error: nccl broadcast requires all tensors on cuda')
+        end
+        ptrs[i - 1] = t._raw.cuda_data
+    end
+
+    local ret = lib.luatorch_nccl_broadcast(ptrs, count, root, num_gpus)
     if ret ~= 0 then
         error('luatorch error: nccl broadcast failed')
     end

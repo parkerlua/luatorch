@@ -230,3 +230,62 @@ void tensor_add_scalar_(Tensor* a, float scalar) {
         a->data[i] += scalar;
     }
 }
+
+// broadcast add: a is [rows, cols], b is [cols]
+// adds b to every row of a
+// this is how bias addition works in linear layers
+Tensor* tensor_add_broadcast(Tensor* a, Tensor* b) {
+    if (!a || !b) return NULL;
+
+    if (a->ndim != 2 || b->ndim != 1) {
+        fprintf(stderr, "luatorch error: add_broadcast requires a=[rows,cols] b=[cols]\n");
+        return NULL;
+    }
+
+    int64_t rows = a->shape[0];
+    int64_t cols = a->shape[1];
+
+    if (cols != b->numel) {
+        fprintf(stderr,
+            "luatorch error: add_broadcast size mismatch, a cols=%lld b=%lld\n",
+            (long long)cols, (long long)b->numel);
+        return NULL;
+    }
+
+    Tensor* out = tensor_new(a->shape, a->ndim, a->dtype, a->device);
+    if (!out) return NULL;
+
+    for (int64_t r = 0; r < rows; r++) {
+        for (int64_t c = 0; c < cols; c++) {
+            out->data[r * cols + c] = a->data[r * cols + c] + b->data[c];
+        }
+    }
+    return out;
+}
+
+// backward of broadcast add for the bias term
+// sums gradients across the batch dimension (rows)
+// grad is [rows, cols], output is [cols]
+Tensor* tensor_add_broadcast_backward(Tensor* grad) {
+    if (!grad) return NULL;
+    if (grad->ndim != 2) {
+        fprintf(stderr, "luatorch error: add_broadcast_backward requires 2D grad\n");
+        return NULL;
+    }
+
+    int64_t rows = grad->shape[0];
+    int64_t cols = grad->shape[1];
+
+    int64_t out_shape[1] = {cols};
+    Tensor* out = tensor_new(out_shape, 1, grad->dtype, grad->device);
+    if (!out) return NULL;
+
+    for (int64_t c = 0; c < cols; c++) {
+        float sum = 0.0f;
+        for (int64_t r = 0; r < rows; r++) {
+            sum += grad->data[r * cols + c];
+        }
+        out->data[c] = sum;
+    }
+    return out;
+}

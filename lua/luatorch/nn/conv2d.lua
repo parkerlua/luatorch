@@ -43,40 +43,8 @@ end
 -- im2col: unroll image patches into columns
 -- input shape is [batch, in_channels, height, width] stored flat
 -- output is [batch * out_h * out_w, in_channels * kh * kw]
-local function im2col(input, batch, channels, height, width,
-                      kernel_size, stride, padding)
-    local out_h = math.floor((height + 2 * padding - kernel_size) / stride) + 1
-    local out_w = math.floor((width  + 2 * padding - kernel_size) / stride) + 1
-    local col_len = channels * kernel_size * kernel_size
-
-    local cols = Tensor.new({batch * out_h * out_w, col_len})
-
-    for b = 0, batch - 1 do
-        for oh = 0, out_h - 1 do
-            for ow = 0, out_w - 1 do
-                local row = b * out_h * out_w + oh * out_w + ow
-                local col = 0
-                for c = 0, channels - 1 do
-                    for kh = 0, kernel_size - 1 do
-                        for kw = 0, kernel_size - 1 do
-                            local ih = oh * stride + kh - padding
-                            local iw = ow * stride + kw - padding
-                            local val = 0.0
-                            if ih >= 0 and ih < height and iw >= 0 and iw < width then
-                                local idx = ((b * channels + c) * height + ih) * width + iw
-                                val = input:get(idx)
-                            end
-                            cols:set(row * col_len + col, val)
-                            col = col + 1
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    return cols, out_h, out_w
-end
+-- perf fix: im2col moved to C (csrc/ops/conv2d.c) for ~100x speedup
+-- the old Lua version used 6 nested loops with element-by-element get/set
 
 -- forward pass
 -- input is [batch, in_channels, height, width] stored as flat tensor
@@ -91,8 +59,8 @@ function Conv2d:forward(input, batch, height, width)
     local out_h = math.floor((height + 2 * pad - ksize) / s) + 1
     local out_w = math.floor((width  + 2 * pad - ksize) / s) + 1
 
-    -- im2col: turn patches into a matrix
-    local cols = im2col(input, batch, in_c, height, width, ksize, s, pad)
+    -- im2col: turn patches into a matrix (C implementation)
+    local cols = Tensor.im2col(input, batch, in_c, height, width, ksize, s, pad)
 
     -- matmul: weight @ cols^T -> [out_c, batch * out_h * out_w]
     -- but our matmul expects [M, K] x [K, N]
@@ -102,15 +70,20 @@ function Conv2d:forward(input, batch, height, width)
     local wt  = Tensor.transpose(self.weight)
     local out = autograd.matmul(cols, wt)
 
-    -- add bias to each output channel
-    local total_spatial = batch * out_h * out_w
-    for i = 0, total_spatial - 1 do
-        for c = 0, out_c - 1 do
-            local idx = i * out_c + c
-            local val = out:get(idx) + self.bias:get(c)
-            out:set(idx, val)
+    -- fix: add bias through broadcast add with autograd so bias gradient flows
+    -- out is [batch*out_h*out_w, out_c], bias is [out_c]
+    local biased = Tensor.add_broadcast(out, self.bias)
+
+    autograd.record("conv2d_bias", {out, self.bias}, biased, function(grad)
+        if out.requires_grad then
+            autograd.acc_grad(out, grad)
         end
-    end
+        if self.bias.requires_grad then
+            autograd.acc_grad(self.bias, Tensor.add_broadcast_backward(grad))
+        end
+    end)
+
+    out = biased
 
     -- store metadata for backward and for downstream layers
     out._conv_batch = batch

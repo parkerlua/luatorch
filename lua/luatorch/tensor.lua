@@ -64,6 +64,12 @@ ffi.cdef[[
     void    tensor_sub_(Tensor* a, Tensor* b);
     void    tensor_mul_scalar_(Tensor* a, float scalar);
     void    tensor_add_scalar_(Tensor* a, float scalar);
+    Tensor* tensor_add_broadcast(Tensor* a, Tensor* b);
+    Tensor* tensor_add_broadcast_backward(Tensor* grad);
+
+    // ops/conv2d.c
+    Tensor* tensor_im2col(Tensor* input, int batch, int channels, int height, int width,
+                           int kernel_size, int stride, int padding);
 
     // ops/matmul.c (cpu)
     Tensor* tensor_matmul(Tensor* a, Tensor* b);
@@ -91,6 +97,9 @@ ffi.cdef[[
     // cuda/tensor.cu
     Tensor* tensor_to_cuda(Tensor* t);
     Tensor* tensor_to_cpu(Tensor* t);
+    Tensor* tensor_to_cuda_async(Tensor* t);
+    Tensor* tensor_to_cpu_async(Tensor* t);
+    void    tensor_sync();
     Tensor* tensor_new_cuda(int64_t* shape, int ndim, int dtype);
     void    tensor_cuda_free(Tensor* t);
 
@@ -116,6 +125,8 @@ ffi.cdef[[
     void    tensor_sub_cuda_(Tensor* a, Tensor* b);
     void    tensor_mul_scalar_cuda_(Tensor* a, float scalar);
     void    tensor_add_scalar_cuda_(Tensor* a, float scalar);
+    Tensor* tensor_add_broadcast_cuda(Tensor* a, Tensor* b);
+    Tensor* tensor_add_broadcast_backward_cuda(Tensor* grad);
 
     // cuda/ops/matmul.cu
     Tensor* tensor_matmul_cuda(Tensor* a, Tensor* b);
@@ -165,6 +176,92 @@ ffi.cdef[[
 
 -- load the compiled C library
 local lib = ffi.load('luatorch')
+
+-- perf fix: cache all hot FFI calls as locals
+-- LuaJIT traces through local FFI calls much better than lib.x lookups
+local C_new           = lib.tensor_new
+local C_free          = lib.tensor_free
+local C_fill          = lib.tensor_fill
+local C_zeros         = lib.tensor_zeros
+local C_ones          = lib.tensor_ones
+local C_rand          = lib.tensor_rand
+local C_randn         = lib.tensor_randn
+local C_print         = lib.tensor_print
+local C_copy          = lib.tensor_copy
+local C_get           = lib.tensor_get
+local C_set           = lib.tensor_set
+local C_add           = lib.tensor_add
+local C_sub           = lib.tensor_sub
+local C_mul           = lib.tensor_mul
+local C_div           = lib.tensor_div
+local C_add_scalar    = lib.tensor_add_scalar
+local C_mul_scalar    = lib.tensor_mul_scalar
+local C_div_scalar    = lib.tensor_div_scalar
+local C_pow_scalar    = lib.tensor_pow_scalar
+local C_neg           = lib.tensor_neg
+local C_abs           = lib.tensor_abs
+local C_sqrt          = lib.tensor_sqrt
+local C_log           = lib.tensor_log
+local C_exp           = lib.tensor_exp
+local C_sum           = lib.tensor_sum
+local C_mean          = lib.tensor_mean
+local C_max           = lib.tensor_max
+local C_min           = lib.tensor_min
+local C_add_          = lib.tensor_add_
+local C_sub_          = lib.tensor_sub_
+local C_mul_scalar_   = lib.tensor_mul_scalar_
+local C_add_scalar_   = lib.tensor_add_scalar_
+local C_add_bc        = lib.tensor_add_broadcast
+local C_add_bc_bwd    = lib.tensor_add_broadcast_backward
+local C_matmul        = lib.tensor_matmul
+local C_bmm           = lib.tensor_bmm
+local C_transpose     = lib.tensor_transpose
+local C_dot           = lib.tensor_dot
+local C_relu          = lib.tensor_relu
+local C_sigmoid       = lib.tensor_sigmoid
+local C_tanh          = lib.tensor_tanh
+local C_gelu          = lib.tensor_gelu
+local C_silu          = lib.tensor_silu
+local C_softmax       = lib.tensor_softmax
+local C_gt_scalar     = lib.tensor_gt_scalar
+local C_to_cuda       = lib.tensor_to_cuda
+local C_to_cpu        = lib.tensor_to_cpu
+-- cuda variants
+local C_add_cuda      = lib.tensor_add_cuda
+local C_sub_cuda      = lib.tensor_sub_cuda
+local C_mul_cuda      = lib.tensor_mul_cuda
+local C_div_cuda      = lib.tensor_div_cuda
+local C_add_scalar_cuda = lib.tensor_add_scalar_cuda
+local C_mul_scalar_cuda = lib.tensor_mul_scalar_cuda
+local C_div_scalar_cuda = lib.tensor_div_scalar_cuda
+local C_pow_scalar_cuda = lib.tensor_pow_scalar_cuda
+local C_neg_cuda      = lib.tensor_neg_cuda
+local C_abs_cuda      = lib.tensor_abs_cuda
+local C_sqrt_cuda     = lib.tensor_sqrt_cuda
+local C_log_cuda      = lib.tensor_log_cuda
+local C_exp_cuda      = lib.tensor_exp_cuda
+local C_sum_cuda      = lib.tensor_sum_cuda
+local C_mean_cuda     = lib.tensor_mean_cuda
+local C_max_cuda      = lib.tensor_max_cuda
+local C_min_cuda      = lib.tensor_min_cuda
+local C_add_cuda_     = lib.tensor_add_cuda_
+local C_sub_cuda_     = lib.tensor_sub_cuda_
+local C_mul_scalar_cuda_ = lib.tensor_mul_scalar_cuda_
+local C_add_scalar_cuda_ = lib.tensor_add_scalar_cuda_
+local C_add_bc_cuda   = lib.tensor_add_broadcast_cuda
+local C_add_bc_bwd_cuda = lib.tensor_add_broadcast_backward_cuda
+local C_matmul_cuda   = lib.tensor_matmul_cuda
+local C_bmm_cuda      = lib.tensor_bmm_cuda
+local C_transpose_cuda = lib.tensor_transpose_cuda
+local C_dot_cuda      = lib.tensor_dot_cuda
+local C_relu_cuda     = lib.tensor_relu_cuda
+local C_sigmoid_cuda  = lib.tensor_sigmoid_cuda
+local C_tanh_cuda     = lib.tensor_tanh_cuda
+local C_gelu_cuda     = lib.tensor_gelu_cuda
+local C_silu_cuda     = lib.tensor_silu_cuda
+local C_softmax_cuda  = lib.tensor_softmax_cuda
+local C_gt_scalar_cuda = lib.tensor_gt_scalar_cuda
+local C_im2col        = lib.tensor_im2col
 
 -- the Lua facing tensor object
 local Tensor = {}
@@ -220,14 +317,14 @@ function Tensor.new(shape, dtype, device)
     }
     local device_map = { cpu = 0, cuda = 1 }
 
-    local raw = lib.tensor_new(c_shape, ndim, dtype_map[dtype], device_map[device])
+    local raw = C_new(c_shape, ndim, dtype_map[dtype], device_map[device])
     return wrap_raw(raw, shape, ndim, dtype, device)
 end
 
 -- clean up C memory when Lua object is garbage collected
 function Tensor:__gc()
     if self._raw ~= nil then
-        lib.tensor_free(self._raw)
+        C_free(self._raw)
         self._raw = nil
     end
 end
@@ -235,7 +332,7 @@ end
 -- move tensor to gpu
 function Tensor:cuda()
     if is_cuda(self) then return self end
-    lib.tensor_to_cuda(self._raw)
+    C_to_cuda(self._raw)
     self.device = 'cuda'
     return self
 end
@@ -243,53 +340,73 @@ end
 -- move tensor to cpu
 function Tensor:cpu()
     if not is_cuda(self) then return self end
-    lib.tensor_to_cpu(self._raw)
+    C_to_cpu(self._raw)
     self.device = 'cpu'
     return self
 end
 
+-- perf: async device transfer, overlaps data loading with compute
+-- call sync() before reading data
+function Tensor:cuda_async()
+    if is_cuda(self) then return self end
+    lib.tensor_to_cuda_async(self._raw)
+    self.device = 'cuda'
+    return self
+end
+
+function Tensor:cpu_async()
+    if not is_cuda(self) then return self end
+    lib.tensor_to_cpu_async(self._raw)
+    self.device = 'cpu'
+    return self
+end
+
+function Tensor.sync()
+    lib.tensor_sync()
+end
+
 -- fill operations (cpu only, fill then move if needed)
 function Tensor:fill(value)
-    lib.tensor_fill(self._raw, value)
+    C_fill(self._raw, value)
     return self
 end
 
 function Tensor:zeros()
-    lib.tensor_zeros(self._raw)
+    C_zeros(self._raw)
     return self
 end
 
 function Tensor:ones()
-    lib.tensor_ones(self._raw)
+    C_ones(self._raw)
     return self
 end
 
 function Tensor:rand()
-    lib.tensor_rand(self._raw)
+    C_rand(self._raw)
     return self
 end
 
 function Tensor:randn()
-    lib.tensor_randn(self._raw)
+    C_randn(self._raw)
     return self
 end
 
 function Tensor:print()
-    lib.tensor_print(self._raw)
+    C_print(self._raw)
     return self
 end
 
 function Tensor:copy()
-    local raw_copy = lib.tensor_copy(self._raw)
+    local raw_copy = C_copy(self._raw)
     return wrap_raw(raw_copy, {table.unpack(self.shape)}, self.ndim, self.dtype, self.device)
 end
 
 function Tensor:get(idx)
-    return lib.tensor_get(self._raw, idx)
+    return C_get(self._raw, idx)
 end
 
 function Tensor:set(idx, value)
-    lib.tensor_set(self._raw, idx, value)
+    C_set(self._raw, idx, value)
     return self
 end
 
@@ -313,171 +430,183 @@ end
 
 -- elementwise ops
 function Tensor.add(a, b)
-    if is_cuda(a) then return wrap_result(lib.tensor_add_cuda(a._raw, b._raw), a) end
-    return wrap_result(lib.tensor_add(a._raw, b._raw), a)
+    if is_cuda(a) then return wrap_result(C_add_cuda(a._raw, b._raw), a) end
+    return wrap_result(C_add(a._raw, b._raw), a)
 end
 
 function Tensor.sub(a, b)
-    if is_cuda(a) then return wrap_result(lib.tensor_sub_cuda(a._raw, b._raw), a) end
-    return wrap_result(lib.tensor_sub(a._raw, b._raw), a)
+    if is_cuda(a) then return wrap_result(C_sub_cuda(a._raw, b._raw), a) end
+    return wrap_result(C_sub(a._raw, b._raw), a)
 end
 
 function Tensor.mul(a, b)
-    if is_cuda(a) then return wrap_result(lib.tensor_mul_cuda(a._raw, b._raw), a) end
-    return wrap_result(lib.tensor_mul(a._raw, b._raw), a)
+    if is_cuda(a) then return wrap_result(C_mul_cuda(a._raw, b._raw), a) end
+    return wrap_result(C_mul(a._raw, b._raw), a)
 end
 
 function Tensor.div(a, b)
-    if is_cuda(a) then return wrap_result(lib.tensor_div_cuda(a._raw, b._raw), a) end
-    return wrap_result(lib.tensor_div(a._raw, b._raw), a)
+    if is_cuda(a) then return wrap_result(C_div_cuda(a._raw, b._raw), a) end
+    return wrap_result(C_div(a._raw, b._raw), a)
 end
 
 -- scalar ops
 function Tensor.add_scalar(a, s)
-    if is_cuda(a) then return wrap_result(lib.tensor_add_scalar_cuda(a._raw, s), a) end
-    return wrap_result(lib.tensor_add_scalar(a._raw, s), a)
+    if is_cuda(a) then return wrap_result(C_add_scalar_cuda(a._raw, s), a) end
+    return wrap_result(C_add_scalar(a._raw, s), a)
 end
 
 function Tensor.mul_scalar(a, s)
-    if is_cuda(a) then return wrap_result(lib.tensor_mul_scalar_cuda(a._raw, s), a) end
-    return wrap_result(lib.tensor_mul_scalar(a._raw, s), a)
+    if is_cuda(a) then return wrap_result(C_mul_scalar_cuda(a._raw, s), a) end
+    return wrap_result(C_mul_scalar(a._raw, s), a)
 end
 
 function Tensor.div_scalar(a, s)
-    if is_cuda(a) then return wrap_result(lib.tensor_div_scalar_cuda(a._raw, s), a) end
-    return wrap_result(lib.tensor_div_scalar(a._raw, s), a)
+    if is_cuda(a) then return wrap_result(C_div_scalar_cuda(a._raw, s), a) end
+    return wrap_result(C_div_scalar(a._raw, s), a)
 end
 
 function Tensor.pow_scalar(a, e)
-    if is_cuda(a) then return wrap_result(lib.tensor_pow_scalar_cuda(a._raw, e), a) end
-    return wrap_result(lib.tensor_pow_scalar(a._raw, e), a)
+    if is_cuda(a) then return wrap_result(C_pow_scalar_cuda(a._raw, e), a) end
+    return wrap_result(C_pow_scalar(a._raw, e), a)
 end
 
 -- unary ops
 function Tensor.neg(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_neg_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_neg(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_neg_cuda(a._raw), a) end
+    return wrap_result(C_neg(a._raw), a)
 end
 
 function Tensor.abs(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_abs_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_abs(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_abs_cuda(a._raw), a) end
+    return wrap_result(C_abs(a._raw), a)
 end
 
 function Tensor.sqrt(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_sqrt_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_sqrt(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_sqrt_cuda(a._raw), a) end
+    return wrap_result(C_sqrt(a._raw), a)
 end
 
 function Tensor.log(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_log_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_log(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_log_cuda(a._raw), a) end
+    return wrap_result(C_log(a._raw), a)
 end
 
 function Tensor.exp(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_exp_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_exp(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_exp_cuda(a._raw), a) end
+    return wrap_result(C_exp(a._raw), a)
 end
 
 -- reductions
 function Tensor.sum(a)
-    if is_cuda(a) then return tonumber(lib.tensor_sum_cuda(a._raw)) end
-    return tonumber(lib.tensor_sum(a._raw))
+    if is_cuda(a) then return tonumber(C_sum_cuda(a._raw)) end
+    return tonumber(C_sum(a._raw))
 end
 
 function Tensor.mean(a)
-    if is_cuda(a) then return tonumber(lib.tensor_mean_cuda(a._raw)) end
-    return tonumber(lib.tensor_mean(a._raw))
+    if is_cuda(a) then return tonumber(C_mean_cuda(a._raw)) end
+    return tonumber(C_mean(a._raw))
 end
 
 function Tensor.max(a)
-    if is_cuda(a) then return tonumber(lib.tensor_max_cuda(a._raw)) end
-    return tonumber(lib.tensor_max(a._raw))
+    if is_cuda(a) then return tonumber(C_max_cuda(a._raw)) end
+    return tonumber(C_max(a._raw))
 end
 
 function Tensor.min(a)
-    if is_cuda(a) then return tonumber(lib.tensor_min_cuda(a._raw)) end
-    return tonumber(lib.tensor_min(a._raw))
+    if is_cuda(a) then return tonumber(C_min_cuda(a._raw)) end
+    return tonumber(C_min(a._raw))
 end
 
 -- inplace ops
 function Tensor.add_(a, b)
-    if is_cuda(a) then lib.tensor_add_cuda_(a._raw, b._raw) else lib.tensor_add_(a._raw, b._raw) end
+    if is_cuda(a) then C_add_cuda_(a._raw, b._raw) else C_add_(a._raw, b._raw) end
 end
 
 function Tensor.sub_(a, b)
-    if is_cuda(a) then lib.tensor_sub_cuda_(a._raw, b._raw) else lib.tensor_sub_(a._raw, b._raw) end
+    if is_cuda(a) then C_sub_cuda_(a._raw, b._raw) else C_sub_(a._raw, b._raw) end
 end
 
 function Tensor.mul_scalar_(a, s)
-    if is_cuda(a) then lib.tensor_mul_scalar_cuda_(a._raw, s) else lib.tensor_mul_scalar_(a._raw, s) end
+    if is_cuda(a) then C_mul_scalar_cuda_(a._raw, s) else C_mul_scalar_(a._raw, s) end
 end
 
 function Tensor.add_scalar_(a, s)
-    if is_cuda(a) then lib.tensor_add_scalar_cuda_(a._raw, s) else lib.tensor_add_scalar_(a._raw, s) end
+    if is_cuda(a) then C_add_scalar_cuda_(a._raw, s) else C_add_scalar_(a._raw, s) end
+end
+
+-- broadcast add: a is [rows, cols], b is [cols]
+-- adds b to every row of a, used for bias in linear layers
+function Tensor.add_broadcast(a, b)
+    if is_cuda(a) then return wrap_result(C_add_bc_cuda(a._raw, b._raw), a) end
+    return wrap_result(C_add_bc(a._raw, b._raw), a)
+end
+
+function Tensor.add_broadcast_backward(grad)
+    if is_cuda(grad) then return wrap_result(C_add_bc_bwd_cuda(grad._raw), grad) end
+    return wrap_result(C_add_bc_bwd(grad._raw), grad)
 end
 
 -- matmul ops
 function Tensor.matmul(a, b)
-    if is_cuda(a) then return wrap_result(lib.tensor_matmul_cuda(a._raw, b._raw), a) end
-    return wrap_result(lib.tensor_matmul(a._raw, b._raw), a)
+    if is_cuda(a) then return wrap_result(C_matmul_cuda(a._raw, b._raw), a) end
+    return wrap_result(C_matmul(a._raw, b._raw), a)
 end
 
 function Tensor.bmm(a, b)
-    if is_cuda(a) then return wrap_result(lib.tensor_bmm_cuda(a._raw, b._raw), a) end
-    return wrap_result(lib.tensor_bmm(a._raw, b._raw), a)
+    if is_cuda(a) then return wrap_result(C_bmm_cuda(a._raw, b._raw), a) end
+    return wrap_result(C_bmm(a._raw, b._raw), a)
 end
 
 function Tensor.transpose(a)
     local result
     if is_cuda(a) then
-        result = wrap_result(lib.tensor_transpose_cuda(a._raw), a)
+        result = wrap_result(C_transpose_cuda(a._raw), a)
     else
-        result = wrap_result(lib.tensor_transpose(a._raw), a)
+        result = wrap_result(C_transpose(a._raw), a)
     end
     if result then result.shape = {a.shape[2], a.shape[1]} end
     return result
 end
 
 function Tensor.dot(a, b)
-    if is_cuda(a) then return tonumber(lib.tensor_dot_cuda(a._raw, b._raw)) end
-    return tonumber(lib.tensor_dot(a._raw, b._raw))
+    if is_cuda(a) then return tonumber(C_dot_cuda(a._raw, b._raw)) end
+    return tonumber(C_dot(a._raw, b._raw))
 end
 
 -- activation ops
 function Tensor.relu(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_relu_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_relu(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_relu_cuda(a._raw), a) end
+    return wrap_result(C_relu(a._raw), a)
 end
 
 function Tensor.sigmoid(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_sigmoid_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_sigmoid(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_sigmoid_cuda(a._raw), a) end
+    return wrap_result(C_sigmoid(a._raw), a)
 end
 
 function Tensor.tanh(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_tanh_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_tanh(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_tanh_cuda(a._raw), a) end
+    return wrap_result(C_tanh(a._raw), a)
 end
 
 function Tensor.gelu(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_gelu_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_gelu(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_gelu_cuda(a._raw), a) end
+    return wrap_result(C_gelu(a._raw), a)
 end
 
 function Tensor.silu(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_silu_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_silu(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_silu_cuda(a._raw), a) end
+    return wrap_result(C_silu(a._raw), a)
 end
 
 function Tensor.softmax(a)
-    if is_cuda(a) then return wrap_result(lib.tensor_softmax_cuda(a._raw), a) end
-    return wrap_result(lib.tensor_softmax(a._raw), a)
+    if is_cuda(a) then return wrap_result(C_softmax_cuda(a._raw), a) end
+    return wrap_result(C_softmax(a._raw), a)
 end
 
 function Tensor.gt_scalar(a, s)
-    if is_cuda(a) then return wrap_result(lib.tensor_gt_scalar_cuda(a._raw, s), a) end
-    return wrap_result(lib.tensor_gt_scalar(a._raw, s), a)
+    if is_cuda(a) then return wrap_result(C_gt_scalar_cuda(a._raw, s), a) end
+    return wrap_result(C_gt_scalar(a._raw, s), a)
 end
 
 -- loss ops
@@ -566,6 +695,13 @@ function Tensor.scale_(t, s)
     else
         Tensor.mul_scalar_(t, s)
     end
+end
+
+-- im2col for conv2d, implemented in C for performance
+-- perf fix: moved from pure Lua nested loops to C
+function Tensor.im2col(input, batch, channels, height, width, kernel_size, stride, padding)
+    return wrap_result(C_im2col(input._raw, batch, channels, height, width,
+        kernel_size, stride, padding), input)
 end
 
 -- memory pool

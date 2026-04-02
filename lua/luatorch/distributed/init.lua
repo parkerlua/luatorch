@@ -17,7 +17,7 @@ local has_nccl = pcall(function()
         int  luatorch_nccl_get_gpu_count();
         int  luatorch_nccl_init(int num_gpus);
         int  luatorch_nccl_allreduce(float** ptrs, int64_t count, int num_gpus);
-        int  luatorch_nccl_broadcast(float* ptr, int64_t count, int root, int num_gpus);
+        int  luatorch_nccl_broadcast(float** ptrs, int64_t count, int root, int num_gpus);
         void luatorch_nccl_destroy();
     ]]
 end)

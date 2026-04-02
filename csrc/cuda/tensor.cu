@@ -121,6 +121,71 @@ extern "C" void tensor_cuda_free(Tensor* t) {
     }
 }
 
+// perf fix: async transfer using cuda streams
+// allows data loading to overlap with compute
+static cudaStream_t transfer_stream = NULL;
+
+static cudaStream_t get_transfer_stream() {
+    if (!transfer_stream) {
+        cudaStreamCreate(&transfer_stream);
+    }
+    return transfer_stream;
+}
+
+extern "C" Tensor* tensor_to_cuda_async(Tensor* t) {
+    if (!t) return NULL;
+    if (t->device == DEVICE_CUDA) return t;
+
+    size_t bytes = t->numel * sizeof(float);
+    float* gpu_ptr = (float*)pool_alloc(bytes);
+    if (!gpu_ptr) return NULL;
+
+    cudaStream_t stream = get_transfer_stream();
+    cudaError_t err = cudaMemcpyAsync(gpu_ptr, t->data, bytes,
+        cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "luatorch cuda error: async H2D failed: %s\n", cudaGetErrorString(err));
+        pool_free(gpu_ptr);
+        return NULL;
+    }
+
+    free(t->data);
+    t->data      = NULL;
+    t->cuda_data = gpu_ptr;
+    t->device    = DEVICE_CUDA;
+    return t;
+}
+
+extern "C" Tensor* tensor_to_cpu_async(Tensor* t) {
+    if (!t) return NULL;
+    if (t->device == DEVICE_CPU) return t;
+
+    size_t bytes = t->numel * sizeof(float);
+    float* cpu_ptr = (float*)malloc(bytes);
+    if (!cpu_ptr) return NULL;
+
+    cudaStream_t stream = get_transfer_stream();
+    cudaError_t err = cudaMemcpyAsync(cpu_ptr, t->cuda_data, bytes,
+        cudaMemcpyDeviceToHost, stream);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "luatorch cuda error: async D2H failed: %s\n", cudaGetErrorString(err));
+        free(cpu_ptr);
+        return NULL;
+    }
+
+    pool_free(t->cuda_data);
+    t->cuda_data = NULL;
+    t->data      = cpu_ptr;
+    t->device    = DEVICE_CPU;
+    return t;
+}
+
+extern "C" void tensor_sync() {
+    if (transfer_stream) {
+        cudaStreamSynchronize(transfer_stream);
+    }
+}
+
 // query gpu memory usage
 extern "C" size_t cuda_memory_allocated() {
     return pool_allocated_bytes();

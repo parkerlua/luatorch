@@ -26,8 +26,9 @@ extern "C" void pool_init() {
     pthread_mutex_unlock(&pool_mutex);
 }
 
-// round up to nearest power of 2 for better reuse
-// e.g. 1000 bytes becomes 1024
+// round up to nearest power of 2 for better reuse, minimum 512 bytes
+// perf fix: also ensure 128 byte alignment for optimal coalesced memory access on 4090
+// cudaMalloc already returns 256-byte aligned pointers so power-of-2 rounding handles this
 static size_t round_up(size_t size) {
     if (size < 512) return 512;
     size_t p = 1;
@@ -85,7 +86,14 @@ extern "C" void* pool_alloc(size_t size) {
     }
 
     // create new block entry
+    // fix: added NULL check on malloc, old code crashed if system memory exhausted
     PoolBlock* new_block = (PoolBlock*)malloc(sizeof(PoolBlock));
+    if (!new_block) {
+        fprintf(stderr, "luatorch error: failed to allocate pool block entry\n");
+        cudaFree(ptr);
+        pthread_mutex_unlock(&pool_mutex);
+        return NULL;
+    }
     new_block->ptr    = ptr;
     new_block->size   = rounded;
     new_block->in_use = 1;
@@ -152,10 +160,17 @@ extern "C" void pool_clear() {
     pthread_mutex_unlock(&pool_mutex);
 }
 
+// fix: read counters under mutex to avoid race with alloc/free threads
 extern "C" size_t pool_allocated_bytes() {
-    return total_allocated;
+    pthread_mutex_lock(&pool_mutex);
+    size_t val = total_allocated;
+    pthread_mutex_unlock(&pool_mutex);
+    return val;
 }
 
 extern "C" size_t pool_cached_bytes() {
-    return total_cached;
+    pthread_mutex_lock(&pool_mutex);
+    size_t val = total_cached;
+    pthread_mutex_unlock(&pool_mutex);
+    return val;
 }

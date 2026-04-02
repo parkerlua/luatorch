@@ -31,7 +31,9 @@ function FlashMultiHeadAttention.new(embed_dim, num_heads, causal)
     return self
 end
 
-function FlashMultiHeadAttention:forward(query, key, value)
+-- fix: seq_len and batch_size are passed explicitly instead of hidden _seq_len field
+-- caller sets these before calling forward, or they default to total_tokens and 1
+function FlashMultiHeadAttention:forward(query, key, value, seq_len)
     key   = key   or query
     value = value or query
 
@@ -48,10 +50,8 @@ function FlashMultiHeadAttention:forward(query, key, value)
 
     -- try flash attention on CUDA
     if query.device == 'cuda' then
-        -- for flash attention we need to figure out seq_len
-        -- total_tokens = batch * seq_len, we need the caller to tell us
-        -- for now, assume batch=1 if not specified
-        local seq_len = query._seq_len or total_tokens
+        -- fix: use explicit seq_len parameter instead of undocumented _seq_len field
+        seq_len = seq_len or total_tokens
         local batch = total_tokens / seq_len
 
         -- rearrange [batch*seq, embed] to [batch*heads, seq, hdim]

@@ -59,16 +59,13 @@ function MultiHeadAttention:forward(query, key, value)
     local k_flat = key
     local v_flat = value
 
-    -- if 3D, reshape to 2D for matmul in linear layers
+    -- perf fix: use reshape instead of element-by-element copy
+    -- old code allocated new tensors and copied every element in a loop
+    -- reshape shares the underlying data pointer with no copy
     if query.ndim == 3 then
-        q_flat = Tensor.new({batch * seq_len, self.embed_dim})
-        k_flat = Tensor.new({batch * seq_len, self.embed_dim})
-        v_flat = Tensor.new({batch * seq_len, self.embed_dim})
-        for i = 0, batch * seq_len * self.embed_dim - 1 do
-            q_flat:set(i, query:get(i))
-            k_flat:set(i, key:get(i))
-            v_flat:set(i, value:get(i))
-        end
+        q_flat = query:reshape({batch * seq_len, self.embed_dim})
+        k_flat = key:reshape({batch * seq_len, self.embed_dim})
+        v_flat = value:reshape({batch * seq_len, self.embed_dim})
     end
 
     local q = self.q_proj(q_flat)  -- [batch*seq, embed]

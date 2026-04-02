@@ -115,6 +115,13 @@ Tensor* tensor_cross_entropy_loss(Tensor* pred, Tensor* target) {
         float* row = pred->data + b * classes;
         int64_t label = (int64_t)target->data[b];
 
+        // fix: bounds check label to prevent out of bounds read
+        if (label < 0 || label >= classes) {
+            fprintf(stderr, "luatorch error: cross entropy label %lld out of range [0, %lld)\n",
+                (long long)label, (long long)classes);
+            continue;
+        }
+
         // find max for numerical stability
         float max_val = row[0];
         for (int64_t c = 1; c < classes; c++) {
@@ -155,6 +162,12 @@ Tensor* tensor_cross_entropy_loss_backward(Tensor* pred, Tensor* target) {
         float* row      = pred->data + b * classes;
         float* grad_row = grad->data + b * classes;
         int64_t label   = (int64_t)target->data[b];
+
+        // fix: bounds check label
+        if (label < 0 || label >= classes) {
+            for (int64_t c = 0; c < classes; c++) grad_row[c] = 0.0f;
+            continue;
+        }
 
         // compute softmax for this row
         float max_val = row[0];

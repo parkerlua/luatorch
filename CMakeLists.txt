@@ -26,6 +26,7 @@ set(CPU_SOURCES
     csrc/ops/matmul.c
     csrc/ops/activation.c
     csrc/ops/loss.c
+    csrc/ops/conv2d.c
 )
 
 # cuda source files

@@ -46,18 +46,31 @@ extern "C" int luatorch_nccl_init(int num_gpus) {
 
     n_gpus = num_gpus;
 
-    // allocate communicators and streams
+    // fix: NULL checks on all mallocs, cleanup on failure
     comms = (ncclComm_t*)malloc(num_gpus * sizeof(ncclComm_t));
+    if (!comms) {
+        fprintf(stderr, "luatorch error: failed to allocate nccl communicators\n");
+        return -1;
+    }
     streams = (cudaStream_t*)malloc(num_gpus * sizeof(cudaStream_t));
+    if (!streams) {
+        fprintf(stderr, "luatorch error: failed to allocate cuda streams\n");
+        free(comms); comms = NULL;
+        return -1;
+    }
 
-    // create streams on each gpu
     for (int i = 0; i < num_gpus; i++) {
         CUDA_CHECK(cudaSetDevice(i));
         CUDA_CHECK(cudaStreamCreate(&streams[i]));
     }
 
-    // build device list
     int* devs = (int*)malloc(num_gpus * sizeof(int));
+    if (!devs) {
+        fprintf(stderr, "luatorch error: failed to allocate device list\n");
+        free(streams); streams = NULL;
+        free(comms); comms = NULL;
+        return -1;
+    }
     for (int i = 0; i < num_gpus; i++) devs[i] = i;
 
     // initialize nccl
@@ -97,8 +110,10 @@ extern "C" int luatorch_nccl_allreduce(float** ptrs, int64_t count, int num_gpus
     return 0;
 }
 
-// broadcast tensor from root gpu to all others
-extern "C" int luatorch_nccl_broadcast(float* ptr, int64_t count, int root, int num_gpus) {
+// fix: broadcast now takes per-GPU pointers instead of single pointer
+// old API was wrong because each GPU has its own address space
+// root GPU's data gets copied to all other GPUs' buffers
+extern "C" int luatorch_nccl_broadcast(float** ptrs, int64_t count, int root, int num_gpus) {
     if (!initialized) {
         fprintf(stderr, "luatorch error: nccl not initialized\n");
         return -1;
@@ -107,7 +122,7 @@ extern "C" int luatorch_nccl_broadcast(float* ptr, int64_t count, int root, int 
     NCCL_CHECK(ncclGroupStart());
     for (int i = 0; i < num_gpus; i++) {
         CUDA_CHECK(cudaSetDevice(i));
-        NCCL_CHECK(ncclBroadcast(ptr, ptr, count, ncclFloat, root, comms[i], streams[i]));
+        NCCL_CHECK(ncclBroadcast(ptrs[root], ptrs[i], count, ncclFloat, root, comms[i], streams[i]));
     }
     NCCL_CHECK(ncclGroupEnd());
 

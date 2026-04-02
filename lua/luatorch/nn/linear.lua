@@ -47,10 +47,21 @@ function Linear:forward(input)
     -- main operation: input @ weight
     local out = autograd.matmul(input, self.weight)
 
-    -- add bias if enabled
-    -- bias gets added to every row in the batch
+    -- add bias using broadcast add so [batch, out] + [out] works
     if self.use_bias then
-        out = autograd.add(out, self.bias)
+        local biased = Tensor.add_broadcast(out, self.bias)
+
+        autograd.record("add_broadcast", {out, self.bias}, biased, function(grad)
+            if out.requires_grad then
+                autograd.acc_grad(out, grad)
+            end
+            if self.bias.requires_grad then
+                -- sum grad across batch dimension to get bias gradient
+                autograd.acc_grad(self.bias, Tensor.add_broadcast_backward(grad))
+            end
+        end)
+
+        out = biased
     end
 
     return out

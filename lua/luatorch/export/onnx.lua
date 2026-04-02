@@ -96,17 +96,19 @@ end
 
 -- build a value info proto (for inputs/outputs)
 local function make_value_info(name, shape)
-    -- type_proto for tensor type
+    -- fix: dimensions are submessages (field 1 repeated), each containing dim_value (field 1)
+    -- old code double-encoded by wrapping already-encoded dim_proto in encode_string again
+    -- correct encoding: each dim is a length-delimited submessage containing the varint value
     local dim_parts = {}
     for _, d in ipairs(shape) do
-        -- dim_value (field 1 in dimension)
-        local dim_proto = encode_int(1, d)
-        table.insert(dim_parts, encode_string(1, dim_proto))
+        local dim_value = encode_int(1, d)  -- dim_value field inside TensorShapeProto.Dimension
+        -- wrap as submessage on field 1 of shape (repeated Dimension)
+        table.insert(dim_parts, encode_tag(1, LENGTH) .. encode_varint(#dim_value) .. dim_value)
     end
 
-    -- shape proto (field 2 in tensor type, contains dims)
-    local shape_proto = table.concat(dim_parts)
-    local tensor_shape = encode_string(2, shape_proto)
+    -- shape proto (field 2 in tensor type)
+    local shape_data = table.concat(dim_parts)
+    local tensor_shape = encode_tag(2, LENGTH) .. encode_varint(#shape_data) .. shape_data
 
     -- elem_type: FLOAT = 1 (field 1 in tensor type)
     local elem_type = encode_int(1, 1)

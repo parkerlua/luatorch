@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <stdio.h>
+#include <pthread.h>
 
 // forward declaration
 extern "C" Tensor* tensor_new_cuda(int64_t* shape, int ndim, DType dtype);
@@ -15,17 +16,21 @@ extern "C" Tensor* tensor_new_cuda(int64_t* shape, int ndim, DType dtype);
     } \
 } while(0)
 
-// global cublas handle, created once and reused
+// fix: cublas handle init is now thread-safe with pthread_once
+// old code had a data race if two threads called get_cublas_handle simultaneously
 static cublasHandle_t cublas_handle = NULL;
+static pthread_once_t cublas_init_once = PTHREAD_ONCE_INIT;
+
+static void init_cublas_handle() {
+    cublasStatus_t status = cublasCreate(&cublas_handle);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "luatorch error: failed to create cublas handle\n");
+        cublas_handle = NULL;
+    }
+}
 
 static cublasHandle_t get_cublas_handle() {
-    if (!cublas_handle) {
-        cublasStatus_t status = cublasCreate(&cublas_handle);
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "luatorch error: failed to create cublas handle\n");
-            return NULL;
-        }
-    }
+    pthread_once(&cublas_init_once, init_cublas_handle);
     return cublas_handle;
 }
 

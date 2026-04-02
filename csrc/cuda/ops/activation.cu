@@ -59,30 +59,54 @@ __global__ void gt_scalar_kernel(float* a, float scalar, float* out, int64_t n) 
     if (i < n) out[i] = a[i] > scalar ? 1.0f : 0.0f;
 }
 
-// softmax kernel for 2D tensors
-// each block handles one row
+// fix: softmax kernel parallelized across threads within each row
+// old code used <<<rows, 1>>> (single thread per row), extremely slow for large vocab
+// new code uses blockDim.x threads per row with shared memory reduction
 __global__ void softmax_kernel(float* a, float* out, int64_t rows, int64_t cols) {
+    extern __shared__ float smem[];
+
     int row = blockIdx.x;
     if (row >= rows) return;
 
     float* row_in  = a   + row * cols;
     float* row_out = out + row * cols;
+    int tid = threadIdx.x;
+    int nthreads = blockDim.x;
 
-    // find max for numerical stability
-    float max_val = row_in[0];
-    for (int64_t c = 1; c < cols; c++) {
-        if (row_in[c] > max_val) max_val = row_in[c];
+    // parallel max reduction
+    float local_max = -INFINITY;
+    for (int64_t c = tid; c < cols; c += nthreads) {
+        if (row_in[c] > local_max) local_max = row_in[c];
     }
+    smem[tid] = local_max;
+    __syncthreads();
 
-    // exp and sum
-    float sum = 0.0f;
-    for (int64_t c = 0; c < cols; c++) {
-        row_out[c] = expf(row_in[c] - max_val);
-        sum += row_out[c];
+    for (int s = nthreads / 2; s > 0; s >>= 1) {
+        if (tid < s && smem[tid + s] > smem[tid]) smem[tid] = smem[tid + s];
+        __syncthreads();
     }
+    float max_val = smem[0];
+    __syncthreads();
 
-    // normalize
-    for (int64_t c = 0; c < cols; c++) {
+    // parallel exp and sum reduction
+    float local_sum = 0.0f;
+    for (int64_t c = tid; c < cols; c += nthreads) {
+        float val = expf(row_in[c] - max_val);
+        row_out[c] = val;
+        local_sum += val;
+    }
+    smem[tid] = local_sum;
+    __syncthreads();
+
+    for (int s = nthreads / 2; s > 0; s >>= 1) {
+        if (tid < s) smem[tid] += smem[tid + s];
+        __syncthreads();
+    }
+    float sum = smem[0];
+    __syncthreads();
+
+    // parallel normalize
+    for (int64_t c = tid; c < cols; c += nthreads) {
         row_out[c] /= sum;
     }
 }
@@ -143,12 +167,15 @@ extern "C" Tensor* tensor_softmax_cuda(Tensor* a) {
     Tensor* out = tensor_new_cuda(a->shape, a->ndim, a->dtype);
     if (!out) return NULL;
 
+    // fix: use BLOCK_SIZE threads per row for parallel reduction
+    // old code used <<<rows, 1>>> which was single-threaded per row
+    size_t smem = BLOCK_SIZE * sizeof(float);
+
     if (a->ndim == 1) {
-        // treat as single row
-        softmax_kernel<<<1, 1>>>(a->cuda_data, out->cuda_data, 1, a->numel);
+        softmax_kernel<<<1, BLOCK_SIZE, smem>>>(a->cuda_data, out->cuda_data, 1, a->numel);
     } else if (a->ndim == 2) {
-        // one block per row
-        softmax_kernel<<<a->shape[0], 1>>>(a->cuda_data, out->cuda_data, a->shape[0], a->shape[1]);
+        softmax_kernel<<<a->shape[0], BLOCK_SIZE, smem>>>(
+            a->cuda_data, out->cuda_data, a->shape[0], a->shape[1]);
     } else {
         fprintf(stderr, "luatorch error: cuda softmax only supports 1D and 2D\n");
         return NULL;

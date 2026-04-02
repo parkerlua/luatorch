@@ -333,13 +333,19 @@ extern "C" Tensor* tensor_exp_cuda(Tensor* a) {
 // cuda reduction ops
 // two pass: gpu reduces to block sums, cpu finishes the final reduction
 
+// fix: added error checks on cudaMalloc and malloc in all reduction functions
+// old code had no checks, leaked memory and crashed on allocation failure
+
 extern "C" float tensor_sum_cuda(Tensor* a) {
+    if (!a || a->numel == 0) return 0.0f;
     int blocks = num_blocks(a->numel);
     size_t smem = BLOCK_SIZE * sizeof(float);
 
-    // allocate space for per-block results on gpu
     float* d_block_sums;
-    cudaMalloc((void**)&d_block_sums, blocks * sizeof(float));
+    if (cudaMalloc((void**)&d_block_sums, blocks * sizeof(float)) != cudaSuccess) {
+        fprintf(stderr, "luatorch cuda error: reduction alloc failed\n");
+        return 0.0f;
+    }
 
     sum_kernel<<<blocks, BLOCK_SIZE, smem>>>(a->cuda_data, d_block_sums, a->numel);
     cudaError_t err = cudaGetLastError();
@@ -349,8 +355,11 @@ extern "C" float tensor_sum_cuda(Tensor* a) {
         return 0.0f;
     }
 
-    // copy block results to cpu and sum them
     float* h_block_sums = (float*)malloc(blocks * sizeof(float));
+    if (!h_block_sums) {
+        cudaFree(d_block_sums);
+        return 0.0f;
+    }
     cudaMemcpy(h_block_sums, d_block_sums, blocks * sizeof(float), cudaMemcpyDeviceToHost);
 
     float total = 0.0f;
@@ -367,16 +376,29 @@ extern "C" float tensor_mean_cuda(Tensor* a) {
 }
 
 extern "C" float tensor_max_cuda(Tensor* a) {
+    if (!a || a->numel == 0) return 0.0f;
     int blocks = num_blocks(a->numel);
     size_t smem = BLOCK_SIZE * sizeof(float);
 
     float* d_block_maxs;
-    cudaMalloc((void**)&d_block_maxs, blocks * sizeof(float));
+    if (cudaMalloc((void**)&d_block_maxs, blocks * sizeof(float)) != cudaSuccess) {
+        fprintf(stderr, "luatorch cuda error: reduction alloc failed\n");
+        return 0.0f;
+    }
 
     max_kernel<<<blocks, BLOCK_SIZE, smem>>>(a->cuda_data, d_block_maxs, a->numel);
-    cudaGetLastError();
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "luatorch cuda kernel error: %s\n", cudaGetErrorString(err));
+        cudaFree(d_block_maxs);
+        return 0.0f;
+    }
 
     float* h_block_maxs = (float*)malloc(blocks * sizeof(float));
+    if (!h_block_maxs) {
+        cudaFree(d_block_maxs);
+        return 0.0f;
+    }
     cudaMemcpy(h_block_maxs, d_block_maxs, blocks * sizeof(float), cudaMemcpyDeviceToHost);
 
     float result = h_block_maxs[0];
@@ -390,16 +412,29 @@ extern "C" float tensor_max_cuda(Tensor* a) {
 }
 
 extern "C" float tensor_min_cuda(Tensor* a) {
+    if (!a || a->numel == 0) return 0.0f;
     int blocks = num_blocks(a->numel);
     size_t smem = BLOCK_SIZE * sizeof(float);
 
     float* d_block_mins;
-    cudaMalloc((void**)&d_block_mins, blocks * sizeof(float));
+    if (cudaMalloc((void**)&d_block_mins, blocks * sizeof(float)) != cudaSuccess) {
+        fprintf(stderr, "luatorch cuda error: reduction alloc failed\n");
+        return 0.0f;
+    }
 
     min_kernel<<<blocks, BLOCK_SIZE, smem>>>(a->cuda_data, d_block_mins, a->numel);
-    cudaGetLastError();
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "luatorch cuda kernel error: %s\n", cudaGetErrorString(err));
+        cudaFree(d_block_mins);
+        return 0.0f;
+    }
 
     float* h_block_mins = (float*)malloc(blocks * sizeof(float));
+    if (!h_block_mins) {
+        cudaFree(d_block_mins);
+        return 0.0f;
+    }
     cudaMemcpy(h_block_mins, d_block_mins, blocks * sizeof(float), cudaMemcpyDeviceToHost);
 
     float result = h_block_mins[0];
@@ -436,4 +471,57 @@ extern "C" void tensor_add_scalar_cuda_(Tensor* a, float scalar) {
     int blocks = num_blocks(a->numel);
     add_scalar_inplace_kernel<<<blocks, BLOCK_SIZE>>>(a->cuda_data, scalar, a->numel);
     CUDA_KERNEL_CHECK_VOID();
+}
+
+// broadcast add: a is [rows, cols], b is [cols]
+// adds b to every row of a
+__global__ void add_broadcast_kernel(float* a, float* b, float* out,
+                                      int64_t rows, int64_t cols) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= rows * cols) return;
+    int64_t col = idx % cols;
+    out[idx] = a[idx] + b[col];
+}
+
+extern "C" Tensor* tensor_add_broadcast_cuda(Tensor* a, Tensor* b) {
+    if (!a || !b) return NULL;
+    Tensor* out = tensor_new_cuda(a->shape, a->ndim, a->dtype);
+    if (!out) return NULL;
+
+    int64_t rows = a->shape[0];
+    int64_t cols = a->shape[1];
+    int blocks = num_blocks(rows * cols);
+
+    add_broadcast_kernel<<<blocks, BLOCK_SIZE>>>(
+        a->cuda_data, b->cuda_data, out->cuda_data, rows, cols);
+    CUDA_KERNEL_CHECK();
+    return out;
+}
+
+// perf fix: parallelize broadcast backward with shared memory atomics
+// old code had one thread per column serially looping over all rows
+// new code: each thread handles one element, uses atomicAdd to accumulate per-column
+__global__ void add_broadcast_backward_kernel(float* grad, float* out,
+                                                int64_t rows, int64_t cols) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= rows * cols) return;
+    int64_t col = idx % cols;
+    atomicAdd(&out[col], grad[idx]);
+}
+
+extern "C" Tensor* tensor_add_broadcast_backward_cuda(Tensor* grad) {
+    if (!grad) return NULL;
+    int64_t rows = grad->shape[0];
+    int64_t cols = grad->shape[1];
+
+    int64_t out_shape[1] = {cols};
+    Tensor* out = tensor_new_cuda(out_shape, 1, grad->dtype);
+    if (!out) return NULL;
+
+    // output is zero-initialized by tensor_new_cuda so atomicAdd starts from 0
+    int blocks = num_blocks(rows * cols);
+    add_broadcast_backward_kernel<<<blocks, BLOCK_SIZE>>>(
+        grad->cuda_data, out->cuda_data, rows, cols);
+    CUDA_KERNEL_CHECK();
+    return out;
 }

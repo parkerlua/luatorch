@@ -13,8 +13,8 @@ int luatorch_nccl_init(int num_gpus);
 // count is number of float elements in each tensor
 int luatorch_nccl_allreduce(float** ptrs, int64_t count, int num_gpus);
 
-// broadcast tensor from root gpu to all others
-int luatorch_nccl_broadcast(float* ptr, int64_t count, int root, int num_gpus);
+// fix: broadcast takes per-GPU pointers, not single pointer
+int luatorch_nccl_broadcast(float** ptrs, int64_t count, int root, int num_gpus);
 
 // get number of available gpus
 int luatorch_nccl_get_gpu_count();

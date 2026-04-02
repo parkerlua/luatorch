@@ -2,6 +2,57 @@
 
 ## v0.1.0 — Initial Release
 
+### Bug Fixes (pre-release audit)
+
+**Critical gradient accumulation bug** — All autograd backward functions used `tensor.grad = new_grad` instead of `tensor.grad += new_grad`. Tensors used multiple times (residual connections, weight sharing, `a + a`) only got the last gradient. Fixed in autograd.lua, activation.lua, loss.lua, layernorm.lua, batchnorm.lua, dropout.lua, embedding.lua, positional.lua.
+
+**Linear bias broadcasting** — `autograd.add(out, bias)` crashed when `out` is `[batch, features]` and `bias` is `[features]` because `check_same_size` requires identical shapes. Added `tensor_add_broadcast` (CPU + CUDA) for proper `[rows, cols] + [cols]` addition with correct backward that sums gradients across the batch dimension.
+
+**Conv2d bias dead weights** — Bias was added with raw `tensor:set()` outside autograd, so bias gradients were always zero and bias never learned. Fixed to use `add_broadcast` through autograd with proper backward.
+
+**Flash attention crashes** — `float acc[128]` stack array crashed if `head_dim > 128`. Moved to shared memory (any size). Division by zero on `1/row_sum` when causal mask blocked all keys. Serial kernel launch per batch*head replaced with single launch.
+
+**CUDA memory leaks** — Loss function temp tensors freed with raw `cudaFree` bypassing the memory pool. Fixed to use `pool_free`. Reduction functions had no error checks on `cudaMalloc`/`malloc`, leaked on failure. Memory pool block entry `malloc` had no NULL check.
+
+**Label bounds checking** — Cross entropy cast `float` labels to `int64_t` without validating range. Out-of-bounds labels caused memory corruption. Fixed in CPU (loss.c) and CUDA (loss.cu, fused.cu).
+
+**Thread safety** — cuBLAS handle creation had a race condition on simultaneous init. Fixed with `pthread_once`. Memory pool counter reads had no mutex. Fixed.
+
+**NCCL broadcast API** — Took single `float*` but GPUs have separate address spaces. Changed to `float**` (per-GPU pointers).
+
+**Tensor operations on GPU tensors** — `tensor_get`, `tensor_set`, `tensor_print`, `tensor_copy` crashed when `t->data` was NULL (GPU tensors). Fixed to check and warn.
+
+**Box-Muller randn** — `rand_float()` could return 0.0, causing `logf(0) = -inf`. Fixed with `rand_float_safe()`.
+
+**Adam truncated** — adam.lua file was cut off at `-- cha`. Completed with `set_lr()` and `__tostring()`.
+
+**Softmax single-threaded** — CUDA softmax used `<<<rows, 1>>>` (one thread per row). Parallelized with 256 threads per row using shared memory reduction.
+
+**Fused layernorm single-threaded** — Same issue, same fix.
+
+**Broadcast backward serial** — One thread per column looping all rows. Parallelized with `atomicAdd`, one thread per element.
+
+**Checkpoint dtype** — `string.pack('f')` for everything silently corrupted non-float32 data. Fixed to write dtype code and use correct pack format per type.
+
+**Config tostring** — `#self.values` always returned 0 for hash tables. Fixed to iterate with `pairs()`.
+
+**ONNX double encoding** — Protobuf dimensions were double-wrapped in length-delimited fields. Fixed encoding.
+
+**Flash attention seq_len** — Relied on undocumented `query._seq_len` field that nothing set. Changed to explicit parameter.
+
+**NCCL Lua wrappers** — `allreduce` and `broadcast` accessed `cuda_data` without checking tensor device. Added guards.
+
+### Performance Optimizations
+
+- **LuaJIT FFI caching**: 80+ hot-path C function calls cached as local variables for better trace compilation
+- **Async CUDA transfers**: `cuda_async()`/`cpu_async()` using `cudaMemcpyAsync` with dedicated stream
+- **Autograd graph pruning**: intermediate gradients freed after backward, ~2x less peak gradient memory
+- **C im2col**: conv2d im2col moved from Lua nested loops to C, ~100x faster
+- **Zero-copy reshape**: multihead attention 3D-to-2D uses `reshape()` instead of element-by-element copy
+- **LayerNorm caching**: forward caches `inv_std` and `x_hat`, backward reuses them instead of recomputing 3x
+- **Fused Adam on CUDA**: optimizers auto-dispatch to single-kernel fused adam when tensors are on GPU
+
+
 ### Core
 - Tensor type with shape, strides, dtype, device, ref counting, gradient pointer
 - CPU implementations: fill, zeros, ones, rand, randn (Box-Muller), copy, reshape, get, set, print

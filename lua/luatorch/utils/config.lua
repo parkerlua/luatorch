@@ -84,7 +84,10 @@ function Config:print()
 end
 
 function Config:__tostring()
-    return string.format('Config(%d values)', #self.values)
+    -- fix: count hash table entries properly, # only works on sequences
+    local count = 0
+    for _ in pairs(self.values) do count = count + 1 end
+    return string.format('Config(%d values)', count)
 end
 
 return Config
