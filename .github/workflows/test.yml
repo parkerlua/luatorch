@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install luajit
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit
+
+      - name: install cuda toolkit
+        uses: Jimver/cuda-toolkit@v0.2.14
+        with:
+          cuda: '12.2.0'
+          method: 'network'
+
+      - name: install cmake
+        run: sudo apt-get install -y cmake
+
+      - name: build
+        run: |
+          mkdir build && cd build
+          cmake .. -DCMAKE_CUDA_ARCHITECTURES=75
+          make -j$(nproc)
+          cp libluatorch.so ../lua/luatorch/
+          cd ..
+
+      - name: run tests
+        run: |
+          export LUA_PATH='lua/?.lua;lua/?/init.lua;;'
+          export LUA_CPATH='lua/luatorch/?.so;;'
+          luajit test/run_all.lua
+        # cuda tests will be skipped since no gpu in CI
