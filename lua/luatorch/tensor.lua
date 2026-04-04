@@ -398,7 +398,8 @@ end
 
 function Tensor:copy()
     local raw_copy = C_copy(self._raw)
-    return wrap_raw(raw_copy, {table.unpack(self.shape)}, self.ndim, self.dtype, self.device)
+    -- fix: LuaJIT 2.1 uses global unpack(), not table.unpack (that's Lua 5.2+)
+    return wrap_raw(raw_copy, {unpack(self.shape)}, self.ndim, self.dtype, self.device)
 end
 
 function Tensor:get(idx)

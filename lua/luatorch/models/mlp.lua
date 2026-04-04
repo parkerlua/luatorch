@@ -29,7 +29,8 @@ function MLP.new(sizes)
         end
     end
 
-    self.model = Sequential.new(table.unpack(self.layers))
+    -- fix: LuaJIT uses global unpack(), not table.unpack
+    self.model = Sequential.new(unpack(self.layers))
 
     return self
 end

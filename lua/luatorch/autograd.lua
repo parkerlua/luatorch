@@ -34,6 +34,17 @@ end
 function autograd.record(op, inputs, output, grad_fn)
     if not autograd.enabled then return end
 
+    -- fix: propagate requires_grad to intermediate outputs so gradients flow
+    -- through deep computation graphs. without this, a non-watched intermediate
+    -- tensor would have requires_grad=false, causing its grad_fn to be skipped
+    -- in backward() because node.tensor.grad is never set
+    for _, inp in ipairs(inputs) do
+        if inp.requires_grad then
+            output.requires_grad = true
+            break
+        end
+    end
+
     local node = Node.new(output, op, inputs)
     node.grad_fn = grad_fn
     output._node = node
@@ -136,9 +147,10 @@ function autograd.backward(loss)
         if node.grad_fn and node.tensor.grad then
             node.grad_fn(node.tensor.grad)
 
-            -- free intermediate gradient to reduce memory pressure
-            -- keep gradients on leaf tensors (parameters) since the optimizer needs them
-            if node.op ~= "leaf" and not node.tensor.requires_grad then
+            -- free intermediate gradients after they're consumed
+            -- fix: all non-leaf ops are intermediates to prune. leaf params have op=="leaf"
+            -- and their grad survives because we never run their grad_fn (they have none)
+            if node.op ~= "leaf" then
                 node.tensor.grad = nil
             end
         end

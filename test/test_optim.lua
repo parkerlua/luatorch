@@ -24,8 +24,9 @@ do
         autograd.zero_graph()
         autograd.zero_grad({x})
 
-        -- forward: loss = x^2
-        local loss = Tensor.mul(x, x)
+        -- forward: loss = x^2, must use autograd.mul to build the graph
+        -- fix: old test used Tensor.mul which skips autograd, so no gradient was computed
+        local loss = autograd.mul(x, x)
         autograd.backward(loss)
 
         optimizer:step()
