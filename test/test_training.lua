@@ -19,15 +19,16 @@ do
     targets:set(0, 0); targets:set(1, 1)
     targets:set(2, 1); targets:set(3, 0)
 
+    -- fix: use Tanh instead of ReLU to avoid dying neurons on tiny XOR network
     local model = Sequential.new(
         Linear.new(2, 16),
-        activation.ReLU.new(),
+        activation.Tanh.new(),
         Linear.new(16, 1),
         activation.Sigmoid.new()
     )
 
     local params    = model:parameters()
-    local optimizer = Adam.new(params, 0.01)
+    local optimizer = Adam.new(params, 0.05)
     local criterion = loss_fn.MSELoss.new()
 
     local final_loss = 999

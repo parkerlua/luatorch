@@ -27,12 +27,17 @@ targets:set(2, 1.0)  -- 1 xor 0 = 1
 targets:set(3, 0.0)  -- 1 xor 1 = 0
 
 -- build the network
--- 2 inputs -> 8 hidden neurons -> 1 output
--- relu in the middle to add nonlinearity
+-- 2 inputs -> 16 hidden neurons -> 1 output
+-- using Tanh instead of ReLU because:
+--   1. ReLU suffers from "dying neurons" on small networks like XOR
+--      with only 4 training samples, many hidden neurons get stuck
+--      at zero output and never recover (gradient is zero)
+--   2. Tanh is bounded, differentiable everywhere, never dies
+--   3. Tanh is the classical XOR activation, used in 1986 Rumelhart paper
 local model = Sequential.new(
-    Linear.new(2, 8),
-    activation.ReLU.new(),
-    Linear.new(8, 1),
+    Linear.new(2, 16),
+    activation.Tanh.new(),
+    Linear.new(16, 1),
     activation.Sigmoid.new()
 )
 
@@ -40,8 +45,9 @@ print(tostring(model))
 print(string.format('total parameters: %d', model:num_params()))
 
 -- setup optimizer and loss
+-- lr=0.05 converges faster than 0.001 for this tiny network
 local params    = model:parameters()
-local optimizer = Adam.new(params, 0.01)
+local optimizer = Adam.new(params, 0.05)
 local criterion = loss_fn.MSELoss.new()
 
 -- training loop
