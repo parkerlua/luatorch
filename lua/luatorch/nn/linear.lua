@@ -44,16 +44,20 @@ end
 -- input shape is [batch_size, in_features]
 -- output shape is [batch_size, out_features]
 function Linear:forward(input)
-    -- main operation: input @ weight
-    local out = autograd.matmul(input, self.weight)
+    -- fix: use separate local 'mm_out' that is never reassigned so the closure
+    -- captures the correct tensor. old code reassigned 'out = biased' after
+    -- defining the closure, and since Lua closures capture upvalues by
+    -- reference (not value), the closure's 'out' became 'biased'. backward
+    -- then accumulated gradient on biased instead of propagating to mm_out,
+    -- so the matmul node's grad_fn was skipped and weights never updated.
+    local mm_out = autograd.matmul(input, self.weight)
 
-    -- add bias using broadcast add so [batch, out] + [out] works
     if self.use_bias then
-        local biased = Tensor.add_broadcast(out, self.bias)
+        local biased = Tensor.add_broadcast(mm_out, self.bias)
 
-        autograd.record("add_broadcast", {out, self.bias}, biased, function(grad)
-            if out.requires_grad then
-                autograd.acc_grad(out, grad)
+        autograd.record("add_broadcast", {mm_out, self.bias}, biased, function(grad)
+            if mm_out.requires_grad then
+                autograd.acc_grad(mm_out, grad)
             end
             if self.bias.requires_grad then
                 -- sum grad across batch dimension to get bias gradient
@@ -61,10 +65,10 @@ function Linear:forward(input)
             end
         end)
 
-        out = biased
+        return biased
     end
 
-    return out
+    return mm_out
 end
 
 -- make the layer callable like a function

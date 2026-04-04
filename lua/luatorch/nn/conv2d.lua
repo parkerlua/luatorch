@@ -68,30 +68,30 @@ function Conv2d:forward(input, batch, height, width)
     -- weight is [out_c, in_c*kh*kw]
     -- so we do: cols @ weight^T -> [batch*out_h*out_w, out_c]
     local wt  = Tensor.transpose(self.weight)
-    local out = autograd.matmul(cols, wt)
+    local mm_out = autograd.matmul(cols, wt)
 
-    -- fix: add bias through broadcast add with autograd so bias gradient flows
-    -- out is [batch*out_h*out_w, out_c], bias is [out_c]
-    local biased = Tensor.add_broadcast(out, self.bias)
+    -- fix: same closure upvalue bug as linear.lua had. use a separate local
+    -- 'mm_out' that is never reassigned so the closure captures the correct
+    -- tensor. without this, weight gradients never flow back
+    -- mm_out is [batch*out_h*out_w, out_c], bias is [out_c]
+    local biased = Tensor.add_broadcast(mm_out, self.bias)
 
-    autograd.record("conv2d_bias", {out, self.bias}, biased, function(grad)
-        if out.requires_grad then
-            autograd.acc_grad(out, grad)
+    autograd.record("conv2d_bias", {mm_out, self.bias}, biased, function(grad)
+        if mm_out.requires_grad then
+            autograd.acc_grad(mm_out, grad)
         end
         if self.bias.requires_grad then
             autograd.acc_grad(self.bias, Tensor.add_broadcast_backward(grad))
         end
     end)
 
-    out = biased
-
     -- store metadata for backward and for downstream layers
-    out._conv_batch = batch
-    out._conv_out_h = out_h
-    out._conv_out_w = out_w
-    out._conv_out_c = out_c
+    biased._conv_batch = batch
+    biased._conv_out_h = out_h
+    biased._conv_out_w = out_w
+    biased._conv_out_c = out_c
 
-    return out, out_h, out_w
+    return biased, out_h, out_w
 end
 
 Conv2d.__call = function(self, input, batch, height, width)

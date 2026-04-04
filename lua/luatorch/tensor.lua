@@ -1,5 +1,9 @@
 local ffi = require('ffi')
 
+-- load polyfills for string.pack/unpack and table.unpack on LuaJIT 2.1
+-- LuaJIT without Lua 5.2 compat mode lacks these functions
+require('luatorch.compat')
+
 -- tell LuaJIT about the C structs and functions
 ffi.cdef[[
     typedef enum { DEVICE_CPU = 0, DEVICE_CUDA = 1 } Device;
