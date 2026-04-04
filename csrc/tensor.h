@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // what device the tensor lives on
 typedef enum {
     DEVICE_CPU = 0,
@@ -61,5 +65,9 @@ Tensor* tensor_reshape(Tensor* src, int64_t* new_shape, int new_ndim);
 // device transfer
 Tensor* tensor_to_cuda(Tensor* t);
 Tensor* tensor_to_cpu(Tensor* t);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

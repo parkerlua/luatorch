@@ -3,6 +3,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // initialize the memory pool, call once at startup
 void pool_init();
 
@@ -18,5 +22,9 @@ void pool_clear();
 // get pool statistics
 size_t pool_allocated_bytes();
 size_t pool_cached_bytes();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
